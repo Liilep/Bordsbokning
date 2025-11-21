@@ -1,14 +1,26 @@
-# transformer.py
 import re
 import pandas as pd
 
 
+def cell_str(val) -> str:
+    """Hjälpfunktion: gör om cell till sträng, tom om NaN/None."""
+    if pd.isna(val):
+        return ""
+    return str(val).strip()
+
+
 def transform_bordsbokning(excel_file) -> pd.DataFrame:
     """
-    Läser Tickster-rapporten och returnerar en DataFrame
-    med kolumnerna: Namn, antal, artiklar, bord, tid.
+    Läser Ticksters placeringskorts-rapport och returnerar en DataFrame med:
+
+    - Namn    : ett namn per placeringskort (mellan 'Bord:' och '... personer')
+    - antal   : alltid 1 (en rad per placeringskort)
+    - artiklar: summerade artiklar per bord, t.ex. '4st Vuxen, 2st KAFFE 35kr'
+    - bord    : text som börjar med 'Bord:'
+    - tid     : 'paus' om bordsnamnet innehåller 'paus', annars 'innan'
     """
 
+    # excel_file kan vara antingen filstig (str) eller en fil-liknande stream (Streamlit-upload)
     xls = pd.ExcelFile(excel_file)
     rows = []
 
@@ -16,100 +28,112 @@ def transform_bordsbokning(excel_file) -> pd.DataFrame:
         df = pd.read_excel(xls, sheet_name=sheet, header=None)
         nrows, ncols = df.shape
 
+        # Leta efter alla "Antal" / "Artikel"-block i arket
         for r in range(nrows):
+            for c in range(ncols - 1):
+                v_ant = cell_str(df.iat[r, c])
+                v_art = cell_str(df.iat[r, c + 1])
 
-            # Leta efter "Bord:"
-            cell = str(df.iat[r, 0]) if not pd.isna(df.iat[r, 0]) else ""
-            if not cell.startswith("Bord:"):
-                continue
-
-            bord = cell
-
-            # 1) Hitta NAMNET (exakt 1 namn)
-            namn = None
-            rr = r + 1
-            while rr < nrows:
-                val = df.iat[rr, 0]
-                s = "" if pd.isna(val) else str(val).strip()
-
-                if s == "":
-                    rr += 1
+                if v_ant != "Antal" or v_art != "Artikel":
                     continue
 
-                # Stoppa vid "X personer"
-                if re.search(r"\bpersoner\b", s, flags=re.IGNORECASE):
-                    break
+                header_row = r
+                col_ant = c
+                col_art = c + 1
 
-                # Namn måste innehålla ett komma: "Efternamn, Förnamn"
-                if "," in s:
-                    namn = s
-                    break
+                # 1) Hitta raden med "X personer" ovanför headern i samma kolumn
+                persons_row = None
+                for rr in range(header_row - 1, -1, -1):
+                    s = cell_str(df.iat[rr, col_ant])
+                    if not s:
+                        continue
+                    if re.search(r"\bpersoner\b", s, flags=re.IGNORECASE):
+                        persons_row = rr
+                        break
 
-                rr += 1
+                if persons_row is None:
+                    # Hittade inget "X personer" -> hoppa över blocket
+                    continue
 
-            # Om inget namn hittats hoppar vi över denna sektion
-            if not namn:
-                continue
+                # 2) Hitta bordsrad ("Bord: ...") ovanför persons_row
+                bord = None
+                for rr in range(persons_row - 1, -1, -1):
+                    s = cell_str(df.iat[rr, col_ant])
+                    if s.startswith("Bord:"):
+                        bord = s
+                        break
 
-            # 2) Hitta artikel-header ("Antal" + "Artikel")
-            art_header = None
-            for rr2 in range(r + 1, nrows):
-                col0 = "" if pd.isna(df.iat[rr2, 0]) else str(df.iat[rr2, 0])
-                col1 = "" if (pd.isna(df.iat[rr2, 1]) if 1 >= ncols else True) else str(df.iat[rr2, 1])
+                if bord is None:
+                    continue
 
-                if col0 == "Antal" and col1 == "Artikel":
-                    art_header = rr2
-                    break
+                # 3) Hitta namnet mellan "Bord:" och "X personer"
+                namn = None
+                for rr in range(persons_row - 1, -1, -1):
+                    s = cell_str(df.iat[rr, col_ant])
+                    if not s:
+                        continue
+                    if s.startswith("Bord:"):
+                        # Då har vi kommit upp till bordsraden – sluta leta
+                        break
+                    # Ett namn ser ut som "Efternamn, Förnamn"
+                    if "," in s:
+                        namn = s
+                        break
 
-            if art_header is None:
-                continue
+                if not namn:
+                    # Om inget namn hittas för detta bord/placering hoppar vi över blocket
+                    continue
 
-            # 3) Läs artiklarna under headern och summera
-            article_counts = {}
-            order = []
+                # 4) Läs artiklarna under "Antal/Artikel"-headern och summera per artikel
+                article_counts = {}
+                order = []
 
-            rr3 = art_header + 1
-            while rr3 < nrows:
+                rr = header_row + 1
+                while rr < nrows:
+                    s_qty = cell_str(df.iat[rr, col_ant])
+                    s_art = cell_str(df.iat[rr, col_art])
 
-                qty_val = df.iat[rr3, 0]
-                art_val = df.iat[rr3, 1] if 1 < ncols else None
+                    # Stoppa när både antal och artikel är tomma
+                    if not s_qty and not s_art:
+                        break
 
-                s_qty = "" if pd.isna(qty_val) else str(qty_val).strip()
-                s_art = "" if pd.isna(art_val) else str(art_val).strip()
+                    if s_art:
+                        qty = 0
+                        if s_qty:
+                            txt = s_qty.replace(",", ".")
+                            try:
+                                qty = int(float(txt))
+                            except ValueError:
+                                qty = 0
 
-                # Stopp: båda tomma
-                if s_art == "" and s_qty == "":
-                    break
+                        if s_art not in article_counts:
+                            article_counts[s_art] = 0
+                            order.append(s_art)
+                        article_counts[s_art] += qty
 
-                if s_art != "":
-                    # tolka antal
-                    qty = 0
-                    if s_qty != "":
-                        try:
-                            qty = int(float(s_qty.replace(",", ".")))
-                        except:
-                            qty = 0
+                    rr += 1
 
-                    if s_art not in article_counts:
-                        article_counts[s_art] = 0
-                        order.append(s_art)
-                    article_counts[s_art] += qty
+                # Bygg artikelsträngen: "4st Vuxen, 2st KAFFE 35kr"
+                parts = []
+                for art in order:
+                    qty = article_counts.get(art, 0)
+                    if qty > 0:
+                        parts.append(f"{qty}st {art}")
+                artiklar_str = ", ".join(parts)
 
-                rr3 += 1
+                # 5) Bestäm tid: "paus" eller "innan"
+                tid = "paus" if "paus" in bord.lower() else "innan"
 
-            # 4) Bygg artikelsträngen
-            artiklar_str = ", ".join(f"{article_counts[a]}st {a}" for a in order)
+                # 6) Lägg till en rad i resultatet
+                rows.append(
+                    {
+                        "Namn": namn,
+                        "antal": 1,
+                        "artiklar": artiklar_str,
+                        "bord": bord,
+                        "tid": tid,
+                    }
+                )
 
-            # 5) Paus/innan
-            tid = "paus" if "paus" in bord.lower() else "innan"
-
-            # 6) Lägg till raden
-            rows.append({
-                "Namn": namn,
-                "antal": 1,
-                "artiklar": artiklar_str,
-                "bord": bord,
-                "tid": tid
-            })
-
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows, columns=["Namn", "antal", "artiklar", "bord", "tid"])
+    return result
