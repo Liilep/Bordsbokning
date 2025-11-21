@@ -7,15 +7,6 @@ def transform_bordsbokning(excel_file) -> pd.DataFrame:
     """
     Läser Tickster-rapporten med placeringskort och returnerar en DataFrame
     med kolumnerna: Namn, antal, artiklar, bord, tid.
-
-    - Namn  = värdet under kolumnen "Efternamn, Förnamn" (en rad per person/kund).
-    - antal = 1 (en rad motsvarar en person / ett placeringskort).
-    - artiklar = alla artiklar från blocket "Antal / Artikel", hopslagna till en sträng
-                 som t.ex. "2st TOSCAMAZARIN 40kr, 1st KAFFE 35kr".
-                 Antalet tas från kolumnen "Antal" och summeras per artikel.
-    - bord = texten på raden som börjar med "Bord:" ovanför personerna.
-    - tid  = "paus" om bordsnamnet innehåller ordet "paus" (skiftlägesokänsligt),
-             annars "innan".
     """
 
     xls = pd.ExcelFile(excel_file)
@@ -40,7 +31,8 @@ def transform_bordsbokning(excel_file) -> pd.DataFrame:
                         bord = s
                         break
 
-                # 2) Hämta alla namn-rader mellan "Efternamn, Förnamn" och raden med "X personer"
+                # 2) Hämta alla NAMN mellan "Efternamn, Förnamn" och raden med "X personer"
+                #    => vi filtrerar på rader som innehåller ett kommatecken ","
                 guests = []
                 r = r_name_header + 1
                 while r < nrows:
@@ -55,26 +47,15 @@ def transform_bordsbokning(excel_file) -> pd.DataFrame:
                     if re.search(r"\bpersoner\b", s, flags=re.IGNORECASE):
                         break
 
-                    guests.append(s)
+                    # Ta bara med rader som ser ut som "Efternamn, Förnamn"
+                    if "," in s:
+                        guests.append(s)
+
                     r += 1
 
-                # Om det inte fanns några individuella namn (bara t.ex. en grupp-rad),
-                # använder vi sista icke-tomma raden innan "X personer" som "Namn".
+                # Om det inte finns några riktiga namn här hoppar vi över denna sektion
                 if not guests:
-                    r = r_name_header + 1
-                    last_nonempty = ""
-                    while r < nrows:
-                        val = df.iat[r, c]
-                        s = "" if pd.isna(val) else str(val).strip()
-                        if s == "":
-                            r += 1
-                            continue
-                        if re.search(r"\bpersoner\b", s, flags=re.IGNORECASE):
-                            break
-                        last_nonempty = s
-                        r += 1
-                    if last_nonempty:
-                        guests.append(last_nonempty)
+                    continue
 
                 # 3) Hitta artikel-blocket: rad där det står "Antal" och "Artikel" bredvid varandra
                 art_header_row = None
@@ -136,12 +117,12 @@ def transform_bordsbokning(excel_file) -> pd.DataFrame:
                 # 5) Bestäm "tid" baserat på bordsnamnet
                 tid = "paus" if "paus" in bord.lower() else "innan"
 
-                # 6) Lägg till en rad per gäst
+                # 6) Lägg till en rad per gäst (en per namn)
                 for guest in guests:
                     rows.append(
                         {
                             "Namn": guest,
-                            "antal": 1,  # en rad per person/kort
+                            "antal": 1,
                             "artiklar": articles_str,
                             "bord": bord,
                             "tid": tid,
@@ -150,4 +131,3 @@ def transform_bordsbokning(excel_file) -> pd.DataFrame:
 
     result = pd.DataFrame(rows, columns=["Namn", "antal", "artiklar", "bord", "tid"])
     return result
-
